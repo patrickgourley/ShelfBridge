@@ -6,9 +6,6 @@ ShelfBridge provides a comprehensive command-line interface for all operations. 
 
 ```bash
 node src/main.js <command> [options]
-
-# Or with npm scripts
-npm run <script>
 ```
 
 ### Global Options
@@ -19,6 +16,7 @@ These options can be used with any command:
 |--------|-------------|---------|
 | `--dry-run` | Run without making any changes | `false` |
 | `--skip-validation` | Skip configuration validation on startup | `false` |
+| `--verbose` | Show detailed logging output | `false` |
 | `--help` | Show help for a command | - |
 
 ### Command Behavior
@@ -46,7 +44,6 @@ The main command to sync your reading progress from Audiobookshelf to Hardcover.
 
 ```bash
 node src/main.js sync [options]
-npm run sync  # Shortcut
 ```
 
 #### Options
@@ -93,21 +90,74 @@ node src/main.js sync --user bob --dry-run
 ==================================================
 ```
 
-### `start` - Background Service (Default)
+### `test` - Test API Connections
 
-Start ShelfBridge in interactive mode or as the default command.
+Test API connections for all configured users or a specific user. Useful for verifying that your Audiobookshelf and Hardcover tokens are valid and that the services are reachable.
+
+```bash
+node src/main.js test [options]
+```
+
+#### Options
+
+| Option                | Short | Description                | Example         |
+|-----------------------|-------|----------------------------|-----------------|
+| `--user <userId>`     | `-u`  | Test specific user only    | `-u alice`      |
+
+#### Examples
+
+```bash
+# Test API connections for all users (clean output)
+node src/main.js test
+
+# Test API connections for a specific user (clean output)
+node src/main.js test --user alice
+
+# Test with detailed logging output
+node src/main.js test --verbose
+
+# Test specific user with verbose output
+node src/main.js test --user alice --verbose
+```
+
+#### Output
+
+```
+=== Testing connections for user: alice ===
+✅ Audiobookshelf connection successful
+✅ Hardcover connection successful
+=== Testing connections for user: bob ===
+✅ Audiobookshelf connection successful
+✅ Hardcover connection successful
+```
+
+### `start` - Scheduled Sync Service (Default)
+
+Start ShelfBridge in scheduled sync mode (default behavior).
 
 ```bash
 node src/main.js start
 node src/main.js  # Same as start (default command)
-npm start         # Shortcut
 ```
 
 This command runs the scheduled sync service based on your `sync_schedule` configuration.
 
-### `cron` - Scheduled Sync Service
+### `interactive` - Interactive Mode
 
-Start the background sync service that runs on your configured schedule.
+Start ShelfBridge in interactive mode for manual operations.
+
+```bash
+node src/main.js interactive
+```
+
+- Provides menu-driven interface
+- Manual sync operations
+- Configuration management
+- Cache management
+
+### `cron` - Scheduled Sync Service (Alias)
+
+Alias for the start command - runs the same scheduled sync service.
 
 ```bash
 node src/main.js cron
@@ -378,13 +428,15 @@ node src/main.js schema-inputs
 
 ## 📜 npm Scripts
 
-For convenience, several npm scripts are available:
+For convenience, several npm scripts are available as shortcuts:
 
 | Script | Command | Description |
 |--------|---------|-------------|
 | `npm start` | `node src/main.js` | Start background service |
 | `npm run sync` | `node src/main.js sync` | One-time sync |
 | `npm run dev` | `node --watch src/main.js` | Development mode with auto-restart |
+
+**Note**: All commands can be run directly with `node src/main.js <command>` for more control over options.
 
 ## 🐳 Docker Commands
 
@@ -402,7 +454,7 @@ docker exec -it shelfbridge-container <command>
 
 ```bash
 # Sync in Docker
-docker exec -it shelfbridge npm run sync
+docker exec -it shelfbridge node src/main.js sync
 
 # Debug in Docker
 docker exec -it shelfbridge node src/main.js debug
@@ -413,6 +465,73 @@ docker exec -it shelfbridge node src/main.js cache --clear
 # View logs
 docker-compose logs -f shelfbridge
 ```
+
+### 🚨 Docker Troubleshooting: Native Module Errors
+
+If you see errors like:
+```
+Error: Could not locate the bindings file. Tried:
+ → .../better_sqlite3.node
+```
+or any other native module binding errors.
+
+**The container will automatically attempt to fix all native module issues on startup.** If the automatic fix fails:
+
+1. **Rebuild the Docker image:**
+   ```bash
+   docker-compose build --no-cache
+   ```
+
+2. **Or pull the latest image:**
+   ```bash
+   docker pull ghcr.io/rohit-purandare/shelfbridge:latest
+   ```
+
+3. **For manual Docker builds:**
+   ```bash
+   docker build --no-cache -t shelfbridge .
+   ```
+
+**Why this happens:**
+- Native modules are compiled for specific OS/architecture combinations
+- Moving between different machines or architectures can cause mismatches
+- The container automatically detects and rebuilds all native modules during startup if needed
+
+**What the container does automatically:**
+- Checks all native modules (.node files) for compatibility
+- Rebuilds any broken native modules for the current environment
+- Provides detailed feedback about which modules are working or broken
+- Falls back to helpful error messages if automatic fixes don't work
+
+**Prevention:**
+- Always use the official Docker image when possible
+- If building locally, ensure you build on the same architecture you'll run on
+- The container includes comprehensive native module detection and repair
+
+### Accessing the Interactive CLI Menu in Docker
+
+You can use the interactive menu from within your Docker container. There are two main ways:
+
+#### 1. One-liner (directly from your host):
+```bash
+docker exec -it shelfbridge node src/main.js
+```
+This will launch the interactive menu immediately in your terminal.
+
+#### 2. Open a shell in the container, then run the CLI:
+```bash
+# Enter the container shell
+# (use /bin/bash or /bin/sh depending on your image)
+docker exec -it shelfbridge /bin/bash
+# or
+docker exec -it shelfbridge /bin/sh
+
+# Then, inside the container, run:
+node src/main.js
+# or
+node src/main.js start
+```
+This is useful if you want to run multiple commands or explore the container environment.
 
 ## 🔧 Configuration File Options
 

@@ -2,6 +2,31 @@
 
 This guide helps you diagnose and solve common ShelfBridge issues. Start with the most common problems and work your way through the diagnostic steps.
 
+## 📄 Error Dump Files
+
+When sync errors occur, ShelfBridge automatically creates detailed error reports in the `data/` folder. These files are invaluable for troubleshooting:
+
+**File location:** `data/failed-sync-{user_id}-{timestamp}.txt`
+
+**What they contain:**
+- Complete sync summary with statistics
+- Detailed information for each failed book
+- Specific error messages and actions taken
+- Book identifiers and progress information
+- Processing timings for debugging
+
+**To use error dumps:**
+1. Look for files in the `data/` folder after a failed sync
+2. Open the most recent file with your text editor
+3. Review the error patterns and book details
+4. Use the information to adjust your configuration
+
+**Disable error dumps:**
+```yaml
+global:
+  dump_failed_books: false
+```
+
 ## 🚀 Quick Diagnostics
 
 Before diving into specific issues, run these commands to get a quick overview:
@@ -273,12 +298,78 @@ docker exec -it shelfbridge cp /app/config/config.yaml.example /app/config/confi
 ```
 
 #### Permission Issues
+
+**Common Error:** `permission denied when docker tries to copy the example file`
+
+**Note:** This issue has been automatically resolved in recent versions of ShelfBridge. The container now automatically fixes volume permissions on startup.
+
+**If you're still experiencing this issue:**
+
+**Symptoms:**
+- Container fails to start with permission errors
+- "permission denied" when copying config.yaml.example
+- Container exits immediately after startup
+
+**Diagnostic Steps:**
 ```bash
-# Check file permissions
+# Check container logs for permission errors
+docker-compose logs shelfbridge
+
+# Check file permissions inside container
 docker exec -it shelfbridge ls -la /app/config/
 
-# Fix ownership if needed (run as root)
-docker exec -u root -it shelfbridge chown -R node:node /app/config/
+# Check volume ownership
+docker exec -it shelfbridge ls -la /app/
+```
+
+**Solutions:**
+
+**Option 1: Update to Latest Version (Recommended)**
+```bash
+# Pull the latest image
+docker-compose pull
+
+# Restart with new image
+docker-compose up -d
+```
+
+**Option 2: Manual Fix (Legacy Versions)**
+```bash
+# Fix ownership of config directory (run as root)
+docker exec -u root -it shelfbridge chown -R node:node /app/config
+
+# Fix ownership of data directory
+docker exec -u root -it shelfbridge chown -R node:node /app/data
+
+# Restart container
+docker-compose restart shelfbridge
+```
+
+**Option 3: Recreate Volumes (If above doesn't work)**
+```bash
+# Stop container
+docker-compose down
+
+# Remove volumes (WARNING: This will delete your config and cache)
+docker volume rm shelfbridge-config shelfbridge-data
+
+# Start container (will recreate config from template)
+docker-compose up -d
+```
+
+**Option 4: Use Bind Mounts with Correct Permissions**
+```bash
+# Create local directories with correct ownership
+mkdir -p ./config ./data
+sudo chown -R 1000:1000 ./config ./data
+
+# Update docker-compose.yml to use bind mounts
+volumes:
+  - ./config:/app/config
+  - ./data:/app/data
+
+# Restart container
+docker-compose up -d
 ```
 
 ### Container Keeps Restarting

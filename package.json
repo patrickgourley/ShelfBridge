@@ -1,11 +1,13 @@
 {
   "name": "shelfbridge",
-  "version": "1.1.7",
+  "version": "1.7.2",
   "description": "Sync your audiobook listening progress from Audiobookshelf to Hardcover automatically",
   "main": "src/main.js",
   "type": "module",
   "scripts": {
     "start": "node src/main.js",
+    "interactive": "node src/main.js interactive",
+    "cron": "node src/main.js cron",
     "sync": "node src/main.js sync",
     "test": "node src/main.js test",
     "config": "node src/main.js config",
@@ -27,6 +29,7 @@
     "better-sqlite3": "^12.2.0",
     "commander": "^11.1.0",
     "cron": "^3.1.6",
+    "inquirer": "^12.7.0",
     "js-yaml": "^4.1.0",
     "luxon": "^3.4.4",
     "node-cron": "^3.0.3",

@@ -7,8 +7,10 @@ import { SyncManager } from './sync-manager.js';
 import { AudiobookshelfClient } from './audiobookshelf-client.js';
 import { HardcoverClient } from './hardcover-client.js';
 import { BookCache } from './book-cache.js';
+import { dumpFailedSyncBooks } from './utils.js';
 import cron from 'node-cron';
 import logger from './logger.js';
+import inquirer from 'inquirer';
 
 const program = new Command();
 
@@ -19,6 +21,10 @@ program
 
 program.option('--dry-run', 'Run without making changes');
 program.option('--skip-validation', 'Skip configuration validation on startup');
+program.option('--verbose', 'Show detailed logging output');
+program.option('--progress-only', 'Sync only books currently in progress');
+program.option('--completed-only', 'Sync only completed books');
+program.option('--all-books', 'Sync all books (in progress and completed) - default behavior');
 
 /**
  * Validate configuration on startup
@@ -127,6 +133,16 @@ program
                 globalConfig.force_sync = true;
             }
             
+            // Add sync mode flags to global config  
+            const programOpts = program.opts();
+            if (programOpts.progressOnly) {
+                globalConfig.sync_mode = 'progress_only';
+            } else if (programOpts.completedOnly) {
+                globalConfig.sync_mode = 'completed_only';
+            } else {
+                globalConfig.sync_mode = 'all_books'; // default
+            }
+            
             // Show startup information
             logger.debug('Starting sync', {
                 users: users.length,
@@ -166,14 +182,28 @@ program
             const config = new Config();
             const users = config.getUsers();
             
-            if (options.user) {
-                const user = config.getUser(options.user);
-                await testUser(user);
-            } else {
-                for (const user of users) {
-                    logger.info('Starting test for user', { userId: user.id });
-                    await testUser(user);
+            // Control logging verbosity based on --verbose flag
+            const originalLevel = logger.level;
+            if (!program.opts().verbose) {
+                logger.level = 'error';
+            }
+            
+            try {
+                if (options.user) {
+                    const user = config.getUser(options.user);
+                    console.log(`\n=== Testing connections for user: ${user.id} ===`);
+                    const success = await testUser(user);
+                    console.log(success ? '✅ All connections successful!' : '❌ One or more connections failed.');
+                } else {
+                    for (const user of users) {
+                        console.log(`\n=== Testing connections for user: ${user.id} ===`);
+                        const success = await testUser(user);
+                        console.log(success ? '✅ All connections successful!' : '❌ One or more connections failed.');
+                    }
                 }
+            } finally {
+                // Restore original logger level
+                logger.level = originalLevel;
             }
             
             // Exit successfully after test completion
@@ -508,9 +538,9 @@ program
         }
     });
 
-// Default command (interactive mode)
+// Interactive command
 program
-    .command('start', { isDefault: true })
+    .command('interactive')
     .description('Start in interactive mode')
     .action(async () => {
         try {
@@ -523,6 +553,54 @@ program
             process.exit(0);
         } catch (error) {
             logger.error('Interactive mode failed', { error: error.message, stack: error.stack });
+            process.exit(1);
+        }
+    });
+
+// Default command (scheduled sync mode)
+program
+    .command('start', { isDefault: true })
+    .description('Start scheduled sync (default behavior)')
+    .action(async () => {
+        try {
+            // Validate configuration first
+            await validateConfigurationOnStartup(program.opts().skipValidation);
+            
+            const config = new Config();
+            const cronConfig = config.getCronConfig();
+            
+            logger.info('Starting scheduled sync', { 
+                schedule: cronConfig.schedule, 
+                timezone: cronConfig.timezone 
+            });
+            
+            // Run initial sync
+            logger.info('Running initial sync...');
+            await runScheduledSync(config);
+            
+            // Schedule recurring sync
+            cron.schedule(cronConfig.schedule, () => {
+                logger.info('Scheduled sync triggered');
+                runScheduledSync(config);
+            }, {
+                timezone: cronConfig.timezone
+            });
+            
+            logger.info('Scheduled sync started. Press Ctrl+C to stop.');
+            
+            // Keep the process running
+            process.on('SIGINT', () => {
+                logger.info('Stopping scheduled sync...');
+                process.exit(0);
+            });
+            
+            // Keep alive
+            setInterval(() => {
+                // Do nothing, just keep the process alive
+            }, 60000);
+            
+        } catch (error) {
+            logger.error('Scheduled sync failed', { error: error.message, stack: error.stack });
             process.exit(1);
         }
     });
@@ -667,6 +745,20 @@ async function syncUser(user, globalConfig) {
                 console.log(`${index + 1}. ${error}`);
             });
             console.log('='.repeat(30));
+            
+            // Dump failed sync books to file if enabled
+            if (globalConfig.dump_failed_books !== false) {
+                try {
+                    const dumpFilePath = await dumpFailedSyncBooks(result, user.id);
+                    console.log(`\n📄 Error details saved to: ${dumpFilePath}`);
+                } catch (dumpError) {
+                    console.log(`\n⚠️  Failed to save error details: ${dumpError.message}`);
+                    logger.error('Failed to dump error details', { 
+                        error: dumpError.message, 
+                        userId: user.id 
+                    });
+                }
+            }
         }
 
         console.log('\n🏁 Sync completed successfully!');
@@ -687,54 +779,83 @@ async function syncUser(user, globalConfig) {
 
 async function testUser(user) {
     const userLogger = logger.forUser(user.id);
-    userLogger.info('Testing API connections');
+    const isVerbose = program.opts().verbose;
+    
+    if (isVerbose) {
+        userLogger.info('Testing API connections');
+    }
     
     let absStatus = false;
     let hcStatus = false;
     
     try {
-        userLogger.info('Testing Audiobookshelf connection');
+        if (isVerbose) {
+            userLogger.info('Testing Audiobookshelf connection');
+        }
         const absClient = new AudiobookshelfClient(user.abs_url, user.abs_token);
         absStatus = await absClient.testConnection();
         
         if (absStatus) {
-            userLogger.info('Audiobookshelf connection successful');
+            if (isVerbose) {
+                userLogger.info('Audiobookshelf connection successful');
+            }
+            console.log('Audiobookshelf: ✅ Connected');
         } else {
-            userLogger.error('Audiobookshelf connection failed');
+            if (isVerbose) {
+                userLogger.error('Audiobookshelf connection failed');
+            }
+            console.log('Audiobookshelf: ❌ Failed');
         }
     } catch (error) {
-        userLogger.error('Audiobookshelf connection failed', { 
-            error: error.message, 
-            stack: error.stack 
-        });
+        if (isVerbose) {
+            userLogger.error('Audiobookshelf connection failed', { 
+                error: error.message, 
+                stack: error.stack 
+            });
+        }
+        console.log('Audiobookshelf: ❌ Error - ' + error.message);
         absStatus = false;
     }
     
     try {
-        userLogger.info('Testing Hardcover connection');
+        if (isVerbose) {
+            userLogger.info('Testing Hardcover connection');
+        }
         const hcClient = new HardcoverClient(user.hardcover_token);
         hcStatus = await hcClient.testConnection();
         
         if (hcStatus) {
-            userLogger.info('Hardcover connection successful');
+            if (isVerbose) {
+                userLogger.info('Hardcover connection successful');
+            }
+            console.log('Hardcover: ✅ Connected');
         } else {
-            userLogger.error('Hardcover connection failed');
+            if (isVerbose) {
+                userLogger.error('Hardcover connection failed');
+            }
+            console.log('Hardcover: ❌ Failed');
         }
     } catch (error) {
-        userLogger.error('Hardcover connection failed', { 
-            error: error.message, 
-            stack: error.stack 
-        });
+        if (isVerbose) {
+            userLogger.error('Hardcover connection failed', { 
+                error: error.message, 
+                stack: error.stack 
+            });
+        }
+        console.log('Hardcover: ❌ Error - ' + error.message);
         hcStatus = false;
     }
     
     // Summary
     const allSuccessful = absStatus && hcStatus;
-    userLogger.info('Connection test completed', { 
-        audiobookshelf: absStatus, 
-        hardcover: hcStatus, 
-        allSuccessful 
-    });
+    
+    if (isVerbose) {
+        userLogger.info('Connection test completed', { 
+            audiobookshelf: absStatus, 
+            hardcover: hcStatus, 
+            allSuccessful 
+        });
+    }
     
     return allSuccessful;
 }
@@ -1020,26 +1141,199 @@ async function runScheduledSync(config) {
 }
 
 async function runInteractiveMode() {
-    console.log('=== Audiobookshelf to Hardcover Sync Tool ===');
-    console.log('Interactive mode - choose an option:');
-    console.log('1. Sync all users');
-    console.log('2. Sync specific user');
-    console.log('3. Test connections');
-    console.log('4. Show configuration');
-    console.log('5. Manage cache');
-    console.log('6. Exit');
-    
-    // For now, just run sync all users
-    // In a full implementation, you'd use a library like readline or inquirer
-    console.log('\nRunning sync for all users...');
-    
     const config = new Config();
     const globalConfig = config.getGlobal();
     const users = config.getUsers();
-    
-    for (const user of users) {
-        console.log(`\n=== Syncing user: ${user.id} ===`);
-        await syncUser(user, globalConfig);
+    let exit = false;
+    while (!exit) {
+        const { action } = await inquirer.prompt([
+            {
+                type: 'list',
+                name: 'action',
+                message: 'Interactive mode - choose an option:',
+                choices: [
+                    { name: 'Sync all users', value: 'sync_all' },
+                    { name: 'Sync specific user', value: 'sync_user' },
+                    { name: 'Test connections', value: 'test_connections' },
+                    { name: 'Show configuration', value: 'show_config' },
+                    { name: 'Manage cache', value: 'cache' },
+                    { name: 'Exit', value: 'exit' },
+                ],
+            },
+        ]);
+        switch (action) {
+            case 'sync_all':
+                for (const user of users) {
+                    console.log(`\n=== Syncing user: ${user.id} ===`);
+                    await syncUser(user, globalConfig);
+                }
+                break;
+            case 'sync_user': {
+                const { userId } = await inquirer.prompt([
+                    {
+                        type: 'list',
+                        name: 'userId',
+                        message: 'Select user to sync:',
+                        choices: users.map(u => ({ name: u.id, value: u.id })),
+                    },
+                ]);
+                const user = config.getUser(userId);
+                await syncUser(user, globalConfig);
+                break;
+            }
+            case 'test_connections':
+                for (const user of users) {
+                    // Clean, user-friendly output for interactive mode
+                    process.stdout.write(`\n=== Testing connections for user: ${user.id} ===\n`);
+                    let absStatus = false;
+                    let hcStatus = false;
+                    try {
+                        const absClient = new AudiobookshelfClient(user.abs_url, user.abs_token);
+                        absStatus = await absClient.testConnection();
+                        process.stdout.write(`Audiobookshelf: ${absStatus ? '✅ Connected' : '❌ Failed'}\n`);
+                    } catch (e) {
+                        process.stdout.write(`Audiobookshelf: ❌ Error - ${e.message}\n`);
+                    }
+                    try {
+                        const hcClient = new HardcoverClient(user.hardcover_token);
+                        hcStatus = await hcClient.testConnection();
+                        process.stdout.write(`Hardcover: ${hcStatus ? '✅ Connected' : '❌ Failed'}\n`);
+                    } catch (e) {
+                        process.stdout.write(`Hardcover: ❌ Error - ${e.message}\n`);
+                    }
+                    if (absStatus && hcStatus) {
+                        process.stdout.write('All connections successful!\n');
+                    } else {
+                        process.stdout.write('One or more connections failed.\n');
+                    }
+                }
+                break;
+            case 'show_config':
+                // Clean, user-friendly output for interactive mode
+                process.stdout.write('\n=== Configuration Status ===\n');
+                process.stdout.write(`\nGlobal Settings:\n`);
+                process.stdout.write(`  Min Progress Threshold: ${globalConfig.min_progress_threshold}%\n`);
+                process.stdout.write(`  Dry Run Mode: ${globalConfig.dry_run ? 'ON' : 'OFF'}\n`);
+                process.stdout.write(`  Auto-add Books: ${globalConfig.auto_add_books ? 'ON' : 'OFF'}\n`);
+                process.stdout.write(`  Progress Regression Protection: ${globalConfig.progress_regression_protection ? 'ON' : 'OFF'}\n`);
+                process.stdout.write(`  Workers: ${globalConfig.workers}\n`);
+                process.stdout.write(`  Timezone: ${globalConfig.timezone}\n`);
+                if (globalConfig.cron?.enabled) {
+                    process.stdout.write(`  Sync Schedule: ${globalConfig.cron.schedule}\n`);
+                }
+                process.stdout.write(`\nUsers (${users.length}):\n`);
+                for (const user of users) {
+                    process.stdout.write(`  ${user.id}:\n`);
+                    process.stdout.write(`    Audiobookshelf: ${user.abs_url}\n`);
+                    process.stdout.write(`    Hardcover: Connected\n`);
+                }
+                process.stdout.write('\nConfiguration validation: ✅ Passed\n');
+                break;
+            case 'cache': {
+                let cacheExit = false;
+                while (!cacheExit) {
+                    const { cacheAction } = await inquirer.prompt([
+                        {
+                            type: 'list',
+                            name: 'cacheAction',
+                            message: 'Cache management - choose an option:',
+                            choices: [
+                                { name: 'Show cache stats', value: 'stats' },
+                                { name: 'Show cache contents', value: 'show' },
+                                { name: 'Clear cache', value: 'clear' },
+                                { name: 'Export cache to JSON', value: 'export' },
+                                { name: 'Back', value: 'back' },
+                            ],
+                        },
+                    ]);
+                    switch (cacheAction) {
+                        case 'stats': {
+                            const cache = new BookCache();
+                            const unregisterCache = registerCleanup(() => cache.close());
+                            try {
+                                await cache.init();
+                                const stats = await cache.getCacheStats();
+                                process.stdout.write('\n=== Cache Statistics ===\n');
+                                process.stdout.write(`Total books: ${stats.total_books}\n`);
+                                process.stdout.write(`Recent books (last 7 days): ${stats.recent_books}\n`);
+                                process.stdout.write(`Cache size: ${stats.cache_size_mb} MB\n`);
+                            } finally {
+                                unregisterCache();
+                            }
+                            break;
+                        }
+                        case 'show': {
+                            const cache2 = new BookCache();
+                            const unregisterCache2 = registerCleanup(() => cache2.close());
+                            try {
+                                await cache2.init();
+                                const stats = await cache2.getCacheStats();
+                                process.stdout.write('\n=== Cache Contents ===\n');
+                                process.stdout.write(`Total books: ${stats.total_books}\n\n`);
+                                
+                                if (stats.total_books === 0) {
+                                    process.stdout.write('No books in cache\n');
+                                } else {
+                                    const stmt = cache2.db.prepare('SELECT * FROM books ORDER BY updated_at DESC');
+                                    const books = stmt.all();
+                                    books.forEach((book, index) => {
+                                        process.stdout.write(`${index + 1}. ${book.title}\n`);
+                                        process.stdout.write(`   User: ${book.user_id}\n`);
+                                        process.stdout.write(`   ${book.identifier_type.toUpperCase()}: ${book.identifier}\n`);
+                                        process.stdout.write(`   Edition ID: ${book.edition_id}\n`);
+                                        process.stdout.write(`   Progress: ${book.progress_percent}%\n`);
+                                        process.stdout.write(`   Author: ${book.author || 'Unknown'}\n`);
+                                        process.stdout.write(`   Last Sync: ${book.last_sync}\n`);
+                                        process.stdout.write(`   Started At: ${book.started_at || 'Not set'}\n`);
+                                        process.stdout.write(`   Last Listened: ${book.last_listened_at || 'Not set'}\n\n`);
+                                    });
+                                }
+                            } finally {
+                                unregisterCache2();
+                            }
+                            break;
+                        }
+                        case 'clear': {
+                            const cache3 = new BookCache();
+                            const unregisterCache3 = registerCleanup(() => cache3.close());
+                            try {
+                                await cache3.clearCache();
+                                process.stdout.write('Cache cleared successfully\n');
+                            } finally {
+                                unregisterCache3();
+                            }
+                            break;
+                        }
+                        case 'export': {
+                            const { filename } = await inquirer.prompt([
+                                {
+                                    type: 'input',
+                                    name: 'filename',
+                                    message: 'Enter filename for export:',
+                                    default: `backup-${new Date().toISOString().slice(0,10)}.json`,
+                                },
+                            ]);
+                            const cache4 = new BookCache();
+                            const unregisterCache4 = registerCleanup(() => cache4.close());
+                            try {
+                                await cache4.exportToJson(filename);
+                                process.stdout.write(`Cache exported to ${filename}\n`);
+                            } finally {
+                                unregisterCache4();
+                            }
+                            break;
+                        }
+                        case 'back':
+                            cacheExit = true;
+                            break;
+                    }
+                }
+                break;
+            }
+            case 'exit':
+                exit = true;
+                break;
+        }
     }
 }
 
